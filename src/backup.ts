@@ -1,5 +1,6 @@
 import { exec } from "child_process";
-import { PutObjectCommand, S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
+import { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { createReadStream, unlink, statSync } from "fs";
 import { filesize } from "filesize";
 import path from "path";
@@ -23,37 +24,50 @@ const uploadToS3 = async ({ name, path }: { name: string, path: string }) => {
 
   const client = new S3Client(clientOptions);
 
-  await client.send(
-    new PutObjectCommand({
+  await new Upload({
+    client,
+    params: {
       Bucket: bucket,
       Key: name,
       Body: createReadStream(path),
-    })
-  );
+    },
+  }).done();
 
   console.log("Backup uploaded to S3...");
 }
 
-const dumpToFile = async (path: string) => {
+const dumpToFile = async (filePath: string) => {
   console.log("Dumping DB to file...");
 
   await new Promise((resolve, reject) => {
-    exec(`pg_dump --disable-triggers --dbname=${env.BACKUP_DATABASE_URL} --format=tar | gzip > ${path}`, (error, stdout, stderr) => {
+    exec(`pg_dump --dbname=${env.BACKUP_DATABASE_URL} --format=tar | gzip > ${filePath}`, (error, stdout, stderr) => {
       if (error) {
         reject({ error: error, stderr: stderr.trimEnd() });
         return;
       }
 
+      // not all text in stderr will be a critical error, print the error / warning
       if (stderr != "") {
-        reject({ stderr: stderr.trimEnd() });
+        console.log({ stderr: stderr.trimEnd() });
+      }
+
+      const backupSize = statSync(filePath).size;
+
+      console.log("Backup size:", filesize(backupSize));
+
+      // if stderr did contain a critical error the resulting dumb file's size would be sub 100 bytes
+      if (backupSize < 100) {
+        reject({error: "Backup size does not meet size threshold; check for errors above"});
         return;
       }
 
-      console.log("Backup size:", filesize(statSync(path).size));
+      // if stderr contains text, but the dumb file is not empty, let the user know that it was potently just a warning message
+      if (stderr != "" && backupSize > 100) {
+        console.log(`Warnings detected; Please ensure the backup file "${path.basename(filePath)}" is valid`);
+      }
 
       resolve(undefined);
     });
-
   });
 
   console.log("DB dumped to file...");
